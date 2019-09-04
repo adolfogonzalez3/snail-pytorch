@@ -1,12 +1,15 @@
-# coding=utf-8
-from __future__ import print_function
+'''A module that contains a class for loading the omniglot data set.'''
+import shutil
+from pathlib import Path
+from urllib.request import urlopen
+
+
 import torch.utils.data as data
 import numpy as np
 import errno
 import os
 from PIL import Image
 import torch
-import shutil
 
 '''
 Inspired by https://github.com/pytorch/vision/pull/46
@@ -28,11 +31,11 @@ class OmniglotDataset(data.Dataset):
         'https://github.com/brendenlake/omniglot/raw/master/python/images_background.zip',
         'https://github.com/brendenlake/omniglot/raw/master/python/images_evaluation.zip'
     ]
-    splits_folder = os.path.join('splits', 'vinyals')
+    splits_folder = Path('splits', 'vinyals')
     raw_folder = 'raw'
     processed_folder = 'data'
 
-    def __init__(self, mode='train', root='../dataset/omniglot', transform=None, target_transform=None, download=False):
+    def __init__(self, mode='train', root='../dataset/omniglot', transform=None, target_transform=None, download=True):
         '''
         The items are (filename,category). The index of all the categories can be found in self.idx_classes
         Args:
@@ -42,7 +45,7 @@ class OmniglotDataset(data.Dataset):
         - download: need to download the dataset
         '''
         super(OmniglotDataset, self).__init__()
-        self.root = root
+        self.root = Path(root)
         self.transform = transform
         self.target_transform = target_transform
 
@@ -51,20 +54,21 @@ class OmniglotDataset(data.Dataset):
 
         if not self._check_exists():
             raise RuntimeError(
-                'Dataset not found. You can use download=True to download it')
+                'Dataset not found. You can use download=True to download it'
+            )
 
-        self.classes = get_current_classes(os.path.join(
-            self.root, self.splits_folder, mode + '.txt'))
-        self.all_items = find_items(os.path.join(
-            self.root, self.processed_folder), self.classes)
-
+        self.classes = get_current_classes(
+            self.root / self.splits_folder / (mode + '.txt')
+        )
+        self.all_items = find_items(
+            self.root / self.processed_folder, self.classes
+        )
         self.idx_classes = index_classes(self.all_items)
 
         paths, self.y = zip(*[self.get_path_label(pl)
                               for pl in range(len(self))])
 
-        self.x = map(load_img, paths, range(len(paths)))
-        self.x = list(self.x)
+        self.x = [load_img(path, i) for i, path in enumerate(paths)]
 
     def __getitem__(self, idx):
         x = self.x[idx]
@@ -87,64 +91,49 @@ class OmniglotDataset(data.Dataset):
         return img, target
 
     def _check_exists(self):
-        return os.path.exists(os.path.join(self.root, self.processed_folder))
+        return (self.root / self.processed_folder).exists()
 
     def download(self):
-        from six.moves import urllib
-        import zipfile
-
+        '''Download Omniglot if not exists.'''
         if self._check_exists():
             return
 
-        try:
-            os.makedirs(os.path.join(self.root, self.splits_folder))
-            os.makedirs(os.path.join(self.root, self.raw_folder))
-            os.makedirs(os.path.join(self.root, self.processed_folder))
-        except OSError as e:
-            if e.errno == errno.EEXIST:
-                pass
-            else:
-                raise
+        (self.root / self.splits_folder).mkdir(parents=True, exist_ok=True)
+        (self.root / self.raw_folder).mkdir(exist_ok=True)
+        (self.root / self.processed_folder).mkdir(exist_ok=True)
 
         for k, url in self.vinyals_split_sizes.items():
             print('== Downloading ' + url)
-            data = urllib.request.urlopen(url)
             filename = url.rpartition('/')[-1]
-            file_path = os.path.join(self.root, self.splits_folder, filename)
-            with open(file_path, 'wb') as f:
-                f.write(data.read())
+            download(url, self.root / self.splits_folder / filename)
 
+        orig_root = self.root / self.raw_folder
         for url in self.urls:
             print('== Downloading ' + url)
-            data = urllib.request.urlopen(url)
             filename = url.rpartition('/')[2]
-            file_path = os.path.join(self.root, self.raw_folder, filename)
-            with open(file_path, 'wb') as f:
-                f.write(data.read())
-            orig_root = os.path.join(self.root, self.raw_folder)
-            print("== Unzip from " + file_path + " to " + orig_root)
-            zip_ref = zipfile.ZipFile(file_path, 'r')
-            zip_ref.extractall(orig_root)
-            zip_ref.close()
-        file_processed = os.path.join(self.root, self.processed_folder)
-        for p in ['images_background', 'images_evaluation']:
-            for f in os.listdir(os.path.join(orig_root, p)):
-                shutil.move(os.path.join(orig_root, p, f), file_processed)
-            os.rmdir(os.path.join(orig_root, p))
+            file_path = self.root / self.raw_folder / filename
+            download(url, file_path)
+            print(f'== Unzip from {file_path} to {orig_root}')
+            shutil.unpack_archive(file_path, orig_root)
+        file_processed = str(self.root / self.processed_folder)
+        for image_type in ['images_background', 'images_evaluation']:
+            for path in (orig_root / image_type).iterdir():
+                shutil.move(str(path), file_processed)
+            os.rmdir(orig_root / image_type)
         print("Download finished.")
 
 
 def find_items(root_dir, classes):
+    root_dir = Path(root_dir)
     retour = []
     rots = ['/rot000', '/rot090', '/rot180', '/rot270']
-    for (root, dirs, files) in os.walk(root_dir):
-        for f in files:
-            r = root.split('/')
-            lr = len(r)
-            label = r[lr - 2] + "/" + r[lr - 1]
-            for rot in rots:
-                if label + rot in classes and (f.endswith("png")):
-                    retour.extend([(f, label, root, rot)])
+
+    for path in root_dir.rglob('*.png'):
+        root = str(path.parent)
+        label = f'{path.parts[-3]}/{path.parts[-2]}'
+        for rot in rots:
+            if label + rot in classes:
+                retour.append((path.name, label, root, rot))
     print("== Dataset: Found %d items " % len(retour))
     return retour
 
@@ -180,3 +169,8 @@ def load_img(path, idx):
     x = x.transpose(0, 1).contiguous().view(shape)
 
     return x
+
+def download(url, dest):
+    '''Download a file and write to dest.'''
+    with urlopen(url) as response, open(dest, 'wb') as out_file:
+        shutil.copyfileobj(response, out_file)
